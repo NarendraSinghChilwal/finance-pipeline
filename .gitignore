@@ -6,3 +6,8 @@ __pycache__/
 dbt_packages/
 target/
 logs/
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.backup
+data/
+*.docx
