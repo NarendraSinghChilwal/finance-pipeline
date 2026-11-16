@@ -11,3 +11,4 @@ infra/*.tfstate
 infra/*.tfstate.backup
 data/
 *.docx
+.pytest_cache/

@@ -42,6 +42,7 @@ Usage:
     python scripts/generate_raw_data.py                  # full run + S3 upload
     python scripts/generate_raw_data.py --local-only     # local inspection only
     python scripts/generate_raw_data.py --num-pos 10000  # custom volumes
+    python scripts/generate_raw_data.py --seed 42        # reproducible run
 
 Requires (requirements.txt):
     faker
@@ -121,7 +122,23 @@ RUN_DT = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 # Helpers
 # ---------------------------------------------------------------------------
 def uid() -> str:
-    return str(uuid.uuid4())
+    # random.getrandbits is seedable; uuid.uuid4() is not (it reads os.urandom).
+    # Version-4 bits are still set, so these are valid UUIDv4 strings.
+    return str(uuid.UUID(int=random.getrandbits(128), version=4))
+
+
+def set_seed(seed: int | None) -> None:
+    """Make a run reproducible. Seeds both `random` and Faker's shared generator."""
+    if seed is None:
+        return
+    random.seed(seed)
+    Faker.seed(seed)
+
+
+def unique_ids(rows: list[dict], key: str) -> list[str]:
+    """Order-preserving dedupe. A set would make iteration order depend on
+    PYTHONHASHSEED and silently break --seed reproducibility."""
+    return list(dict.fromkeys(r[key] for r in rows))
 
 
 def now_iso() -> str:
@@ -638,7 +655,10 @@ def main():
     parser.add_argument("--num-invoices",  type=int, default=6000)
     parser.add_argument("--local-only",    action="store_true")
     parser.add_argument("--out-dir",       default="data/raw")
+    parser.add_argument("--seed",          type=int, default=None,
+                        help="Seed for reproducible output (used by the tests)")
     args = parser.parse_args()
+    set_seed(args.seed)
 
     bucket  = os.environ.get("S3_LANDING_BUCKET")
     out_dir = Path(args.out_dir)
@@ -656,7 +676,7 @@ def main():
     )
 
     suppliers       = build_suppliers(args.num_suppliers)
-    supplier_ids    = list({s["supplier_id"] for s in suppliers})
+    supplier_ids    = unique_ids(suppliers, "supplier_id")
     purchase_orders = build_purchase_orders(args.num_pos, supplier_ids)
     receipts        = build_receipts(purchase_orders)
     invoices        = build_invoices(purchase_orders, supplier_ids, args.num_invoices)
