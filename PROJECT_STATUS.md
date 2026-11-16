@@ -17,7 +17,7 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
 | 0 | Environment, git, gitignore, AWS budget alert | DONE |
 | 1 | S3 bucket + IAM loader user (Terraform) | DONE |
 | 3 | Synthetic data generator + data in S3 | DONE (pytest suite added, 24 tests) |
-| 2 | Snowflake foundation | IN PROGRESS -- account, service user, credit cap done; Terraform objects NOT yet written |
+| 2 | Snowflake foundation (Terraform: warehouses, FINANCE_DEV, schemas, RBAC) | DONE (34 resources applied 2026-11-16, negative RBAC test passed) |
 | 4 | Batch ingestion (S3 -> COPY INTO) | not started |
 | 5 | Streaming (MSK Serverless, producer/consumer, MERGE on payment_id) | not started |
 | 6-9 | dbt sources/Bronze, Silver (incremental + SCD2 snapshot), Gold (3-way match), tests | not started |
@@ -42,9 +42,15 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
   Service user `TERRAFORM_SVC` (TYPE=SERVICE, key-pair only, no password) holds SYSADMIN + SECURITYADMIN.
   Private key `~/.snowflake/tf_key.p8` (never in repo/chat), public key `~/.snowflake/tf_key.pub`.
 - Terraform files in `infra/`: providers.tf (ONE required_providers block: hashicorp/aws ~>5.0, snowflakedb/snowflake ~>2.0),
-  snowflake.tf (two provider configs: default role SYSADMIN, alias `security_admin` role SECURITYADMIN), variables.tf, s3.tf, iam.tf.
-  `terraform validate` passes. Terraform's Snowflake LOGIN IS NOT YET PROVEN -- the provider connects lazily; the first plan with a real
-  Snowflake resource is the real test.
+  snowflake.tf (two provider configs: default role SYSADMIN, alias `security_admin` role SECURITYADMIN), variables.tf, s3.tf, iam.tf,
+  snowflake_objects.tf (SYSADMIN-owned objects), snowflake_rbac.tf (roles + grants via SECURITYADMIN). Terraform login as TERRAFORM_SVC PROVEN.
+- Phase 2 objects (all Terraform): warehouses LOADING_WH / TRANSFORMING_WH / REPORTING_WH (XSMALL, auto_suspend 60, auto_resume,
+  initially suspended, statement timeout 1800s); database FINANCE_DEV (var `snowflake_database_name`, retention 1 day, PUBLIC dropped);
+  schemas RAW, BRONZE, SILVER, GOLD (all MANAGED ACCESS -- dbt owns its tables but cannot grant on them; access is decided only in Terraform).
+  Roles (all granted to SYSADMIN so no orphaned objects): LOADER_ROLE (LOADING_WH; USAGE RAW; INSERT+SELECT on all+future RAW tables),
+  TRANSFORMER_ROLE (TRANSFORMING_WH; SELECT all+future RAW tables; USAGE+CREATE TABLE+CREATE VIEW on BRONZE/SILVER/GOLD),
+  REPORTER_ROLE (REPORTING_WH; SELECT all+future tables and views in GOLD only). Object grants are schema-level, ALL + FUTURE pairs.
+  Verified: CREATE TABLE in GOLD as REPORTER_ROLE fails with insufficient privileges (negative test).
 - `.env` variable names: SNOWFLAKE_ACCOUNT/USER/PASSWORD (blank, unused -- Snowflake access is key-pair), AWS_PROFILE,
   LOADER_AWS_ACCESS_KEY_ID, LOADER_AWS_SECRET_ACCESS_KEY, LOADER_AWS_REGION, S3_LANDING_BUCKET.
 
@@ -74,17 +80,16 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
 - Terraform splits provider roles: SYSADMIN creates objects, SECURITYADMIN creates roles/grants. ACCOUNTADMIN is never held by automation.
 
 ## Next steps (in order)
-1. Phase 2 Terraform (check the CURRENT snowflakedb/snowflake 2.x docs for exact resource names before writing -- older guides are outdated):
-   XSMALL warehouse (auto_suspend 60, auto_resume) for loading and one for transforming if sensible; database FINANCE_DEV with schemas
-   RAW, BRONZE, SILVER, GOLD; roles LOADER_ROLE (write RAW only), TRANSFORMER_ROLE (build BRONZE/SILVER/GOLD, read RAW),
-   REPORTER_ROLE (read-only GOLD) with grants via provider alias `snowflake.security_admin`; consider service users per role later.
-   First plan proves Terraform can log in as TERRAFORM_SVC. Optional extra (Enterprise): masking policy on suppliers.bank_account for REPORTER_ROLE.
-2. Phase 4 prerequisites on the AWS side (Terraform): an IAM role Snowflake can assume (storage integration) with read/list on the bucket
+1. Phase 4 prerequisites on the AWS side (Terraform): an IAM role Snowflake can assume (storage integration) with read/list on the bucket
    (this is separate from the loader user), then in Snowflake: STORAGE INTEGRATION, FILE FORMAT (CSV, header skip, empty-field-as-null),
    one external STAGE per dataset prefix, RAW tables matching the data contract above, then COPY INTO. Verify with COPY_HISTORY. Test idempotency
    (re-running COPY INTO on loaded files is a no-op) and note the duplicate invoice rows and SCD2 supplier rows are expected in RAW.
-3. Phase 5 (MSK Serverless): create per session and DELETE (not stop) at the end -- no auto-suspend. IAM auth only; no public broker for real use.
-   Write consumer tests for "same payment delivered twice -> one row".
+   NOTE: in provider 2.23 snowflake_storage_integration, _stage, _file_format and _table are PREVIEW resources -- add the matching
+   `<name>_resource` entries to `preview_features_enabled` in BOTH provider blocks in snowflake.tf. Phase 4 also needs a LOADER service user
+   (key-pair, default role LOADER_ROLE, TIMEZONE='UTC') and USAGE grants on the stages/file format to LOADER_ROLE.
+2. Phase 5 (MSK Serverless): create per session and DELETE (not stop) at the end -- no auto-suspend. IAM auth only; no public broker for real use.
+   Write consumer tests for "same payment delivered twice -> one row". Add UPDATE to LOADER_ROLE's RAW table grants for the MERGE.
+3. Later: masking policy on suppliers.bank_account for REPORTER_ROLE (Enterprise feature) once the Silver/Gold supplier model exists.
 
 ## Open items
 - Rotate the `finance-pipeline-loader` AWS access key (the old key appeared in a chat). `terraform apply -replace=aws_iam_access_key.finance_pipeline_loader`.
@@ -98,6 +103,9 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
 - A second `required_providers` block in another file made `terraform init` fail; Terraform allows exactly one per module.
 - Seeding the generator exposed two reproducibility traps: uuid4 is not seedable, and iterating a set of strings varies with PYTHONHASHSEED.
 - The old Snowflake provider (`snowflake-labs`, 0.x) is outdated; current is `snowflakedb/snowflake` 2.x.
+- Copied grant syntax from the Pulumi docs (`on_schema = { ... }`) -> `terraform validate` failed: in HCL those are nested BLOCKS
+  (`on_schema { ... }`), not map attributes. Validate before trusting any snippet.
+- Negative RBAC test: CREATE TABLE as REPORTER_ROLE fails as designed. Did NOT click Snowsight's "Resolve access error" (it would grant the privilege).
 
 ## How to work with me (Narendra)
 - I want exact commands and copy-paste code and clear "do this next" steps, not a stream of questions. I am short on patience for long setup.

@@ -15,3 +15,9 @@ variable "snowflake_private_key_path" {
   type    = string
   default = "~/.snowflake/tf_key.p8"
 }
+
+# Parameterised so Phase 11 can stamp out FINANCE_CI / FINANCE_PROD with the same code.
+variable "snowflake_database_name" {
+  type    = string
+  default = "FINANCE_DEV"
+}
