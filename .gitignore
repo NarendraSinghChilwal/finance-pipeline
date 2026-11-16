@@ -12,3 +12,7 @@ infra/*.tfstate.backup
 data/
 *.docx
 .pytest_cache/
+infra/tfplan
+*.tfplan
+*.p8
+*.pem
