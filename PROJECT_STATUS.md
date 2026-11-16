@@ -32,7 +32,8 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
 - AWS: region eu-west-1. Admin identity = IAM user `NarendraChilwal` (MFA), CLI profile `finance-pipeline`.
   Service identity = IAM user `finance-pipeline-loader` (S3 put/get/delete/list on ONE bucket only), keys in `.env` as LOADER_AWS_*.
 - S3 bucket: `finance-pipeline-ingest-2026` (public access blocked, versioning on, SSE-S3). Layout: `<dataset>/<YYYY-MM-DD>/<dataset>_<runid>.csv`.
-  Currently holds exactly 4 objects (one file per batch dataset, run 20260822T130416).
+  Currently holds 8 objects: two runs (20260822T130416 and 20261116T141623), one file per batch dataset each.
+  Phase 4 COPY INTO will load BOTH runs into RAW -- expected; the same business IDs appear once per run, so Silver must dedupe (or load one run only).
 - AWS account is on a FREE PLAN with credits (ends ~21 Feb 2027). Check MSK Serverless is allowed before Phase 5.
 - Snowflake: ENTERPRISE edition trial, AWS eu-west-1 (Ireland). Created 2026-11-16, 30-day trial (~$400 credits), ends ~2026-12-16.
   Account identifier: organization `VMYOYIJ`, account `EB08969`. Default session timezone is America/Los_Angeles (-0800) -- set explicitly later.
@@ -92,13 +93,15 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
 3. Later: masking policy on suppliers.bank_account for REPORTER_ROLE (Enterprise feature) once the Silver/Gold supplier model exists.
 
 ## Open items
-- Rotate the `finance-pipeline-loader` AWS access key (the old key appeared in a chat). `terraform apply -replace=aws_iam_access_key.finance_pipeline_loader`.
 - Check the Snowflake activation email was clicked.
 - Stray file `Good.docx` in the project root (gitignored, harmless).
 - Remote Terraform state, second environment, encrypted key in a secrets manager = "what I'd change for production" (README Status section).
 
 ## Lessons / interview stories (real things that happened)
 - A saved Terraform plan (`tfplan`) got committed; checked it for secrets (none), untracked it, gitignored plan files and keys.
+- Rotated the loader AWS key with `terraform apply -replace=...` (2026-11-16). Old key was destroyed before .env had the new one = brief outage;
+  production fix is zero-downtime rotation (second key -> deploy -> delete old) or no long-lived keys at all (IAM role). Wrote the new key into
+  .env straight from `terraform output` with sed (no clipboard), verified by a real S3 upload.
 - A stray `%` (zsh end-of-output marker) copied into a secret key caused AWS SignatureDoesNotMatch. Use `| pbcopy` instead of hand-copying.
 - A second `required_providers` block in another file made `terraform init` fail; Terraform allows exactly one per module.
 - Seeding the generator exposed two reproducibility traps: uuid4 is not seedable, and iterating a set of strings varies with PYTHONHASHSEED.
