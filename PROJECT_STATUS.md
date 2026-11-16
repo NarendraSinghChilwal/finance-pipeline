@@ -18,7 +18,7 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
 | 1 | S3 bucket + IAM loader user (Terraform) | DONE |
 | 3 | Synthetic data generator + data in S3 | DONE (pytest suite added, 24 tests) |
 | 2 | Snowflake foundation (Terraform: warehouses, FINANCE_DEV, schemas, RBAC) | DONE (34 resources applied 2026-11-16, negative RBAC test passed) |
-| 4 | Batch ingestion (S3 -> COPY INTO) | not started |
+| 4 | Batch ingestion (S3 -> COPY INTO) | DONE except loader service user (load proven 2026-11-16, idempotent) |
 | 5 | Streaming (MSK Serverless, producer/consumer, MERGE on payment_id) | not started |
 | 6-9 | dbt sources/Bronze, Silver (incremental + SCD2 snapshot), Gold (3-way match), tests | not started |
 | 10 | Airflow DAG (Docker) | not started |
@@ -45,6 +45,17 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
 - Terraform files in `infra/`: providers.tf (ONE required_providers block: hashicorp/aws ~>5.0, snowflakedb/snowflake ~>2.0),
   snowflake.tf (two provider configs: default role SYSADMIN, alias `security_admin` role SECURITYADMIN), variables.tf, s3.tf, iam.tf,
   snowflake_objects.tf (SYSADMIN-owned objects), snowflake_rbac.tf (roles + grants via SECURITYADMIN). Terraform login as TERRAFORM_SVC PROVEN.
+  snowflake_ingest.tf (Phase 4): IAM role finance-pipeline-snowflake-s3-read (read-only, trusts only the integration's IAM user + external ID),
+  storage integration FINANCE_S3_INT (allowed location = the bucket only), 4 external stages RAW.<DATASET>_STAGE with inline CSV format
+  (skip_header 1, quoted fields, null_if ['']), USAGE on stages to LOADER_ROLE only. ONE apply: the role ARN is built as a string, so the
+  integration doesn't depend on the role resource (no cycle). snowflake_raw_tables.tf: RAW.SUPPLIERS / PURCHASE_ORDERS / RECEIPTS / INVOICES,
+  all business columns VARCHAR + _SOURCE_FILE, _SOURCE_ROW_NUMBER, _LOADED_AT. snowflake_table is preview -> preview_features_enabled =
+  ["snowflake_table_resource"] on the SYSADMIN provider only. Stage/integration resources used are the new stable ones (no preview flag).
+- Bootstrap (ACCOUNTADMIN, by hand, recorded in sql/00_bootstrap_accountadmin.sql): GRANT CREATE INTEGRATION ON ACCOUNT TO ROLE SYSADMIN.
+- RAW loaded 2026-11-16 by Narendra as LOADER_ROLE with sql/04_load_raw.sql: SUPPLIERS 467, PURCHASE_ORDERS 10000, RECEIPTS 6658,
+  INVOICES 12360 -- each from 2 files (runs 20260822T130416 + 20261116T141623). Re-run = "0 files processed" (load metadata, 64 days).
+  Same business IDs appear once per run -> Silver must dedupe on business key (latest _LOADED_AT / _SOURCE_FILE).
+- SQL lives in sql/ (versioned); Snowsight worksheets are only where it is run.
 - Phase 2 objects (all Terraform): warehouses LOADING_WH / TRANSFORMING_WH / REPORTING_WH (XSMALL, auto_suspend 60, auto_resume,
   initially suspended, statement timeout 1800s); database FINANCE_DEV (var `snowflake_database_name`, retention 1 day, PUBLIC dropped);
   schemas RAW, BRONZE, SILVER, GOLD (all MANAGED ACCESS -- dbt owns its tables but cannot grant on them; access is decided only in Terraform).
@@ -81,13 +92,8 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
 - Terraform splits provider roles: SYSADMIN creates objects, SECURITYADMIN creates roles/grants. ACCOUNTADMIN is never held by automation.
 
 ## Next steps (in order)
-1. Phase 4 prerequisites on the AWS side (Terraform): an IAM role Snowflake can assume (storage integration) with read/list on the bucket
-   (this is separate from the loader user), then in Snowflake: STORAGE INTEGRATION, FILE FORMAT (CSV, header skip, empty-field-as-null),
-   one external STAGE per dataset prefix, RAW tables matching the data contract above, then COPY INTO. Verify with COPY_HISTORY. Test idempotency
-   (re-running COPY INTO on loaded files is a no-op) and note the duplicate invoice rows and SCD2 supplier rows are expected in RAW.
-   NOTE: in provider 2.23 snowflake_storage_integration, _stage, _file_format and _table are PREVIEW resources -- add the matching
-   `<name>_resource` entries to `preview_features_enabled` in BOTH provider blocks in snowflake.tf. Phase 4 also needs a LOADER service user
-   (key-pair, default role LOADER_ROLE, TIMEZONE='UTC') and USAGE grants on the stages/file format to LOADER_ROLE.
+1. Finish Phase 4: a LOADER service user (key-pair, default role LOADER_ROLE, default warehouse LOADING_WH, TIMEZONE='UTC') so
+   COPY INTO runs as a service identity, not Narendra's login. Needed before Airflow (Phase 10) can run sql/04_load_raw.sql.
 2. Phase 5 (MSK Serverless): create per session and DELETE (not stop) at the end -- no auto-suspend. IAM auth only; no public broker for real use.
    Write consumer tests for "same payment delivered twice -> one row". Add UPDATE to LOADER_ROLE's RAW table grants for the MERGE.
 3. Later: masking policy on suppliers.bank_account for REPORTER_ROLE (Enterprise feature) once the Silver/Gold supplier model exists.
@@ -109,6 +115,12 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
 - Copied grant syntax from the Pulumi docs (`on_schema = { ... }`) -> `terraform validate` failed: in HCL those are nested BLOCKS
   (`on_schema { ... }`), not map attributes. Validate before trusting any snippet.
 - Negative RBAC test: CREATE TABLE as REPORTER_ROLE fails as designed. Did NOT click Snowsight's "Resolve access error" (it would grant the privilege).
+
+- Pulumi docs mirror the provider version but NOT HCL names: describe_outputs -> describe_output, null_ifs -> null_if. Validate catches it.
+- First COPY INTO written by Narendra himself: caught stage-name typo, missing ';', SUUPLIERS typo and $1-$10 on the 7-column receipts file
+  (column-count mismatch). DESC TABLE before writing a load is the habit. Idempotency shown live (0 files processed on re-run).
+- COPY idempotency is FILE-level (path + checksum, per table, 64 days): changed content or a renamed copy WILL reload. Row-level
+  idempotency is a modelling job (Silver dedupe; MERGE on payment_id for streaming).
 
 ## How to work with me (Narendra)
 - I want exact commands and copy-paste code and clear "do this next" steps, not a stream of questions. I am short on patience for long setup.

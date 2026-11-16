@@ -13,6 +13,10 @@ provider "snowflake" {
   authenticator     = "SNOWFLAKE_JWT"
   private_key       = file(pathexpand(var.snowflake_private_key_path))
   role              = "SYSADMIN"
+
+  # snowflake_table is still a PREVIEW resource in 2.23 (needed for the RAW landing tables, Phase 4).
+  # Enabled only on the SYSADMIN provider, the only one that creates tables.
+  preview_features_enabled = ["snowflake_table_resource"]
 }
 
 provider "snowflake" {
