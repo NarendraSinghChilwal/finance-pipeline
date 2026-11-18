@@ -1,0 +1,18 @@
+# Sources = tables dbt READS but does not build. These are the RAW tables loaded by COPY INTO (Phase 4).
+# Models refer to them with {{ source('raw', 'invoices') }} instead of hard-coding FINANCE_DEV.RAW.INVOICES,
+# so dbt knows the lineage (RAW -> BRONZE -> ...) and the database/schema live in one place.
+
+sources:
+  - name: raw
+    description: "Landing tables loaded from S3 by COPY INTO. All business columns are VARCHAR, plus lineage columns."
+    database: FINANCE_DEV
+    schema: RAW
+    tables:
+      - name: suppliers
+        description: "Supplier master data; SCD2 updates arrive as extra rows with a later updated_at."
+      - name: purchase_orders
+        description: "Purchase orders (one line per PO)."
+      - name: receipts
+        description: "Goods receipt notes against POs."
+      - name: invoices
+        description: "Supplier invoices; po_id can be empty (invoice without PO) and re-submissions are duplicates."

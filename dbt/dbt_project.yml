@@ -1,0 +1,28 @@
+# dbt project for the finance reconciliation pipeline (dbt v2).
+# Connection details are NOT here -- they live in ~/.dbt/profiles.yml under the profile name below.
+
+name: finance_pipeline
+version: "1.0.0"
+profile: finance_pipeline
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+snapshot-paths: ["snapshots"]
+seed-paths: ["seeds"]
+analysis-paths: ["analyses"]
+
+clean-targets: ["target", "dbt_packages"]
+
+# Medallion layers -> Snowflake schemas. The folder a model lives in decides where it is built and how.
+models:
+  finance_pipeline:
+    bronze:
+      +schema: BRONZE        # typed, renamed, 1:1 with RAW tables
+      +materialized: view    # cheap: no storage, always reflects RAW
+    silver:
+      +schema: SILVER        # cleaned, deduplicated, incremental
+      +materialized: table
+    gold:
+      +schema: GOLD          # business logic: 3-way match, exceptions
+      +materialized: table

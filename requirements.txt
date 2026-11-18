@@ -1,3 +1,4 @@
 faker==40.37.0
 boto3==1.43.78
 python-dotenv==1.2.3
+dbt==2.0.12
