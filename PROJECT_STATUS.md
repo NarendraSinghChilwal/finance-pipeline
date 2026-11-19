@@ -18,9 +18,10 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
 | 1 | S3 bucket + IAM loader user (Terraform) | DONE |
 | 3 | Synthetic data generator + data in S3 | DONE (pytest suite added, 24 tests) |
 | 2 | Snowflake foundation (Terraform: warehouses, FINANCE_DEV, schemas, RBAC) | DONE (34 resources applied 2026-11-16, negative RBAC test passed) |
-| 4 | Batch ingestion (S3 -> COPY INTO) | DONE except loader service user (load proven 2026-11-16, idempotent) |
+| 4 | Batch ingestion (S3 -> COPY INTO) | DONE (load proven 2026-11-16, idempotent; LOADER_SVC created) |
 | 5 | Streaming (MSK Serverless, producer/consumer, MERGE on payment_id) | not started |
-| 6-9 | dbt sources/Bronze, Silver (incremental + SCD2 snapshot), Gold (3-way match), tests | not started |
+| 6 | dbt v2 project + Bronze (4 typed views) + tests | DONE 2026-11-19 (28/28 tests pass) |
+| 7-9 | Silver (dedupe, SCD2 snapshot, incremental), Gold (3-way match + exceptions), unit tests | next (doing dbt BEFORE Kafka) |
 | 10 | Airflow DAG (Docker) | not started |
 | 11 | GitHub Actions CI/CD (dev/CI/prod databases) | not started |
 | 12 | dbt docs, README with honest Status section | not started |
@@ -54,7 +55,21 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
 - Bootstrap (ACCOUNTADMIN, by hand, recorded in sql/00_bootstrap_accountadmin.sql): GRANT CREATE INTEGRATION ON ACCOUNT TO ROLE SYSADMIN.
 - RAW loaded 2026-11-16 by Narendra as LOADER_ROLE with sql/04_load_raw.sql: SUPPLIERS 467, PURCHASE_ORDERS 10000, RECEIPTS 6658,
   INVOICES 12360 -- each from 2 files (runs 20260822T130416 + 20261116T141623). Re-run = "0 files processed" (load metadata, 64 days).
-  Same business IDs appear once per run -> Silver must dedupe on business key (latest _LOADED_AT / _SOURCE_FILE).
+  CORRECTED 2026-11-19 (data profiled): the two runs share NO ids (generator makes fresh UUIDs). Real duplicates are inside a run and
+  intentional: invoices 12,360 rows / 12,000 distinct ids (re-submissions = anomaly), suppliers 467 / 400 (SCD2 versions).
+  POs (10,000) and receipts (6,658) are unique. 483 invoices have no PO (anomaly). All links intact (receipt->PO, PO->supplier, invoice->PO).
+- Service users (infra/snowflake_service_users.tf, TYPE=SERVICE, key-pair only, keys in ~/.snowflake/*_svc_rsa_key.p8):
+  LOADER_SVC -> LOADER_ROLE / LOADING_WH; DBT_SVC -> TRANSFORMER_ROLE / TRANSFORMING_WH. Public key read by Terraform via file().
+- dbt v2 (dbt==2.0.12 pinned; v1 beta uninstalled). Connection in ~/.dbt/profiles.yml (profile finance_pipeline, target dev, DBT_SVC,
+  private_key_path, FINANCE_DEV, default schema BRONZE). `dbt debug` passes. Project in dbt/: dbt_project.yml (folder -> schema +
+  materialization: bronze=view, silver/gold=table), macros/generate_schema_name.sql (use +schema exactly), models/bronze/_sources.yml
+  (source 'raw' = FINANCE_DEV.RAW; TODO: use target.database when adding environments).
+- Bronze (written by Narendra): bronze_invoices / _suppliers / _purchase_orders / _receipts = RAW typed with try_cast
+  (money number(18,2), counts number(38,0), date, timestamp_tz, boolean) + lineage passthrough. Manual checks: counts = RAW, 0 bad casts.
+- Tests: models/bronze/_bronze_models.yml (26 generic: not_null, unique on po_id/receipt_id only, accepted_values, relationships) +
+  tests/assert_bronze_rowcounts_match_raw.sql (technical reconciliation) + tests/assert_due_date_not_before_invoice_date.sql
+  (written by Narendra). NOT tested on purpose: unique invoice_id / supplier_id, not_null invoice po_id (real business events).
+- Interview doc: claude.ai Project file claude/interview-question-bank.md (Part A coding cheat sheet, Part B 43 questions).
 - SQL lives in sql/ (versioned); Snowsight worksheets are only where it is run.
 - Phase 2 objects (all Terraform): warehouses LOADING_WH / TRANSFORMING_WH / REPORTING_WH (XSMALL, auto_suspend 60, auto_resume,
   initially suspended, statement timeout 1800s); database FINANCE_DEV (var `snowflake_database_name`, retention 1 day, PUBLIC dropped);
@@ -92,11 +107,15 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
 - Terraform splits provider roles: SYSADMIN creates objects, SECURITYADMIN creates roles/grants. ACCOUNTADMIN is never held by automation.
 
 ## Next steps (in order)
-1. Finish Phase 4: a LOADER service user (key-pair, default role LOADER_ROLE, default warehouse LOADING_WH, TIMEZONE='UTC') so
-   COPY INTO runs as a service identity, not Narendra's login. Needed before Airflow (Phase 10) can run sql/04_load_raw.sql.
-2. Phase 5 (MSK Serverless): create per session and DELETE (not stop) at the end -- no auto-suspend. IAM auth only; no public broker for real use.
-   Write consumer tests for "same payment delivered twice -> one row". Add UPDATE to LOADER_ROLE's RAW table grants for the MERGE.
-3. Later: masking policy on suppliers.bank_account for REPORTER_ROLE (Enterprise feature) once the Silver/Gold supplier model exists.
+1. Silver: dedupe invoice re-submissions (decide the rule: keep first submission, flag the rest for Gold), SCD2 snapshot for suppliers
+   (dbt snapshot on supplier_id, updated_at), incremental model where it makes sense; tests: unique invoice_id AFTER dedupe,
+   one current row per supplier.
+2. Gold: 3-way match (PO <-> receipt <-> invoice) + exception tables for the 7 batch anomalies; dbt unit tests for the matching logic;
+   model contract on Gold; warn-severity on exception counts. Optional: docs/source_to_target_mapping.md.
+3. Phase 5 (MSK Serverless): create per session and DELETE (not stop) at the end -- no auto-suspend. IAM auth only.
+   Consumer test "same payment delivered twice -> one row". Add UPDATE to LOADER_ROLE's RAW grants for the MERGE. Then Gold part 2
+   (late + partial payment anomalies).
+4. Later: masking policy on suppliers.bank_account for REPORTER_ROLE; source database via target.database; TIMEZONE='UTC' on service users.
 
 ## Open items
 - Check the Snowflake activation email was clicked.
@@ -121,6 +140,10 @@ Scope decision: transformation stays dbt on Snowflake. PySpark is deliberately o
   (column-count mismatch). DESC TABLE before writing a load is the habit. Idempotency shown live (0 files processed on re-run).
 - COPY idempotency is FILE-level (path + checksum, per table, 64 days): changed content or a renamed copy WILL reload. Row-level
   idempotency is a modelling job (Silver dedupe; MERGE on payment_id for streaming).
+
+- dbt v2 surfaced on install (newer than Claude's training); chose v2 as vendor default for new projects, pinned 2.0.12.
+- Saving a dbt model changes nothing in Snowflake until `dbt run`; a moved file shows as a strikethrough tab in VS Code (saving recreates it).
+- Profiling before testing: rows vs distinct ids showed which `unique` tests would be noise. "A test encodes what must ALWAYS be true at that layer."
 
 ## How to work with me (Narendra)
 - I want exact commands and copy-paste code and clear "do this next" steps, not a stream of questions. I am short on patience for long setup.

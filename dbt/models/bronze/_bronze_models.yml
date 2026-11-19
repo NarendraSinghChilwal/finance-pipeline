@@ -1,0 +1,117 @@
+# Bronze data tests + documentation.
+# Rule of thumb: a test encodes what must ALWAYS be true at this layer.
+# Deliberately NOT tested here (they are real business events, not data errors):
+#   - unique invoice_id   -> re-submitted invoices share an id (anomaly, flagged in Gold)
+#   - unique supplier_id  -> SCD2 updates repeat a supplier with new details (handled in Silver)
+#   - not_null invoice po_id -> invoices without a PO (anomaly, flagged in Gold)
+
+models:
+  - name: bronze_invoices
+    description: "RAW.INVOICES typed. One row per landed invoice row; re-submissions are kept (duplicates by design)."
+    columns:
+      - name: invoice_id
+        description: "Supplier invoice id. Not unique in Bronze: re-submissions repeat it."
+        data_tests:
+          - not_null
+      - name: supplier_id
+        data_tests:
+          - not_null
+      - name: po_id
+        description: "Can be NULL (invoice without a PO). When present it must point to a real PO."
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('bronze_purchase_orders')
+                field: po_id
+      - name: invoice_amount
+        data_tests:
+          - not_null
+      - name: invoice_currency
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['GBP', 'USD', 'EUR']
+      - name: invoice_date
+        data_tests:
+          - not_null
+      - name: status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['APPROVED', 'DISPUTED', 'PAID', 'PENDING']
+
+  - name: bronze_purchase_orders
+    description: "RAW.PURCHASE_ORDERS typed. One row per PO."
+    columns:
+      - name: po_id
+        data_tests:
+          - not_null
+          - unique
+      - name: supplier_id
+        description: "Every PO must belong to a known supplier."
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('bronze_suppliers')
+                field: supplier_id
+      - name: quantity
+        data_tests:
+          - not_null
+      - name: unit_price
+        data_tests:
+          - not_null
+      - name: line_total
+        data_tests:
+          - not_null
+      - name: currency
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['GBP', 'USD', 'EUR']
+      - name: status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['OPEN', 'CLOSED', 'CANCELLED']
+
+  - name: bronze_receipts
+    description: "RAW.RECEIPTS typed. One row per goods receipt note."
+    columns:
+      - name: receipt_id
+        data_tests:
+          - not_null
+          - unique
+      - name: po_id
+        description: "Every receipt must be against a real PO."
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('bronze_purchase_orders')
+                field: po_id
+      - name: quantity_received
+        data_tests:
+          - not_null
+
+  - name: bronze_suppliers
+    description: "RAW.SUPPLIERS typed. Not unique on supplier_id: SCD2 updates add rows (deduped/historised in Silver)."
+    columns:
+      - name: supplier_id
+        data_tests:
+          - not_null
+      - name: payment_terms
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['IMMEDIATE', 'NET_30', 'NET_60', 'NET_90']
+      - name: currency
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['GBP', 'USD', 'EUR']
+      - name: is_active
+        description: "Must convert cleanly from 'True'/'False' text. NULL here means try_cast failed."
+        data_tests:
+          - not_null
