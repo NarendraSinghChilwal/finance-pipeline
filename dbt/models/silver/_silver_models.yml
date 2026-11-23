@@ -1,0 +1,47 @@
+# Silver data tests + documentation.
+# Silver promises clean entities at a declared grain: ONE row per invoice_id.
+# Re-submissions are removed here (first submission kept); their count is kept in
+# submission_count, so Gold can still flag the duplicate-invoice anomaly.
+# Deliberately NOT enforced here:
+#   - not_null po_id -> invoices without a PO are a business anomaly, flagged in Gold
+
+models:
+  - name: silver_invoices
+    description: "One row per invoice_id. Re-submissions removed: first submission kept, how many times it was submitted stored in submission_count."
+    columns:
+      - name: invoice_id
+        description: "Supplier invoice id. Unique in Silver (Bronze repeats it for re-submissions)."
+        data_tests:
+          - not_null
+          - unique
+      - name: supplier_id
+        data_tests:
+          - not_null
+      - name: po_id
+        description: "Can be NULL (invoice without a PO). When present it must point to a real PO."
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('bronze_purchase_orders')
+                field: po_id
+      - name: invoice_amount
+        data_tests:
+          - not_null
+      - name: invoice_currency
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['GBP', 'USD', 'EUR']
+      - name: invoice_date
+        data_tests:
+          - not_null
+      - name: status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['APPROVED', 'DISPUTED', 'PAID', 'PENDING']
+      - name: submission_count
+        description: "How many times this invoice was submitted. 1 = normal, >1 = re-submitted (flagged in Gold)."
+        data_tests:
+          - not_null
