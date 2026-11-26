@@ -1,9 +1,12 @@
 # Silver data tests + documentation.
-# Silver promises clean entities at a declared grain: ONE row per invoice_id.
-# Re-submissions are removed here (first submission kept); their count is kept in
-# submission_count, so Gold can still flag the duplicate-invoice anomaly.
+# Silver promises clean entities at a declared grain:
+#   - silver_invoices:  ONE row per invoice_id. Re-submissions removed (first submission kept);
+#                       their count is kept in submission_count, so Gold can flag the duplicate-invoice anomaly.
+#   - silver_suppliers: SCD2, ONE row per supplier per version (valid_from/valid_to), exactly one current row.
 # Deliberately NOT enforced here:
-#   - not_null po_id -> invoices without a PO are a business anomaly, flagged in Gold
+#   - not_null po_id    -> invoices without a PO are a business anomaly, flagged in Gold
+#   - unique supplier_id across ALL rows -> suppliers have one row per version; unique only among current rows
+#   - not_null valid_to -> NULL means "still current"
 
 models:
   - name: silver_invoices
@@ -43,5 +46,30 @@ models:
                 values: ['APPROVED', 'DISPUTED', 'PAID', 'PENDING']
       - name: submission_count
         description: "How many times this invoice was submitted. 1 = normal, >1 = re-submitted (flagged in Gold)."
+        data_tests:
+          - not_null
+
+  - name: silver_suppliers
+    description: "SCD2, One row per supplier per version. valid_from/valid_to to give the period each version was true; exactly one currrent row per supplier."
+    columns:
+      - name: supplier_id
+        description: "Not unique overall(one row per version), unique among current rows."
+        data_tests:
+          - not_null
+          - unique:
+              config:
+                where: "is_current"
+      - name: valid_from
+        description: "When this version of the supplier became valid."
+        data_tests:
+          - not_null
+      - name: valid_to
+        description: "When this version of the supplier stopped being valid. NULL for current version."
+      - name: bank_account
+        description: "Bank account number for this version of the supplier."
+        data_tests:
+          - not_null
+      - name: is_current
+        description: "True for the current version of the supplier, false for historical versions." 
         data_tests:
           - not_null
